@@ -1,0 +1,620 @@
+#include <linux/module.h> 
+#include <linux/kernel.h> 
+#include <linux/init.h>
+#include <linux/netfilter.h>
+#include <linux/skbuff.h>
+#include <linux/ip.h>
+#include <linux/netdevice.h>
+#include <linux/if_ether.h>
+#include <linux/if_packet.h>
+#include <linux/inet.h>
+#include <net/tcp.h>
+#include <net/udp.h>
+#include <net/icmp.h>
+#include <linux/netfilter_ipv4.h>
+#include <linux/moduleparam.h>
+
+#define SHOW_ADDR(addr) \
+	((unsigned char*)&addr)[0], ((unsigned char*)&addr)[1],((unsigned char*)&addr)[2],((unsigned char*)&addr)[3]
+
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("neteye");
+
+#define    ETH    "eth1"
+
+static char  *ip_var = "www.baidu.com";
+static struct nf_hook_ops modify_ops;
+
+
+module_param(ip_var,charp,0644);
+MODULE_PARM_DESC(ip_var,"A ip variable");
+/*http 301*/
+char http_redir_header[300]= {'\0'};
+
+//"HTTP/1.1 301 Moved Permanently\r\nLocation: http://www.baidu.com\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-length: 0\r\nCache-control: no-cache\r\n\r\n";
+ 
+/*pre-routing hook response*/
+unsigned int syn_ack(uint32_t sip, uint32_t dip,
+		uint16_t sport, uint16_t dport, 
+		unsigned char *smac, unsigned char* dmac,
+		uint32_t seq, uint32_t ack_seq)
+{
+	struct sk_buff* myskb;
+	struct iphdr* iph;
+	struct tcphdr* tcph;
+	struct ethhdr* ethh;
+	struct net_device *dev;
+	dev = dev_get_by_name(ETH);
+	
+	myskb = alloc_skb(sizeof(struct iphdr) + sizeof(struct tcphdr) + LL_RESERVED_SPACE (dev), GFP_ATOMIC);
+  
+  if(NULL == myskb){
+  	printk("myskb alloc error\n");
+	kfree(myskb);
+	return 1;
+  }
+  /*remain dev space*/
+  skb_reserve(myskb,LL_RESERVED_SPACE(dev));
+
+  /**/
+  myskb->dev = dev;
+  myskb->pkt_type = PACKET_OTHERHOST;
+  myskb->protocol = __constant_htons(ETH_P_IP);
+  myskb->ip_summed = CHECKSUM_NONE;
+  myskb->priority = 0;
+  
+  myskb->nh.iph = (struct iphdr*)skb_put(myskb, sizeof (struct iphdr));
+  myskb->h.th = (struct tcphdr*)skb_put(myskb, sizeof (struct tcphdr));
+
+  {
+    tcph = (struct tcphdr *) myskb->h.th;
+    memset (tcph, 0, sizeof (struct tcphdr));
+    tcph->source = htons(sport); /*exchange*/
+    tcph->dest = htons(dport);
+    tcph->seq = 0;
+    tcph->ack_seq = htonl(seq + 1);
+    tcph->doff = 5;
+    tcph->psh = 0;
+    tcph->fin = 0;
+    tcph->syn = 1;
+    tcph->ack = 1;
+	tcph->rst = 0;
+    tcph->window = __constant_htons (5840);
+    myskb->csum = 0;
+    tcph->check = 0;
+  }
+  
+  {
+    iph = (struct iphdr*) myskb->nh.iph;
+    iph->version = 4;
+    iph->ihl = sizeof(struct iphdr)>>2;
+    iph->frag_off = 0;
+    iph->protocol = IPPROTO_TCP;
+    iph->tos = 0;
+    iph->daddr = dip;   /*exchange*/
+    iph->saddr = sip;
+    iph->ttl = 0x40;
+    iph->tot_len = __constant_htons(myskb->len);
+    iph->check = 0;
+  }
+  
+  myskb->csum = skb_checksum (myskb, iph->ihl*4, myskb->len - iph->ihl * 4, 0);
+  iph->check = ip_fast_csum((void*)iph, iph->ihl);
+  tcph->check = csum_tcpudp_magic (sip, dip, myskb->len - iph->ihl * 4, IPPROTO_TCP, myskb->csum);
+
+  
+  myskb->mac.raw = skb_push(myskb, ETH_HLEN);
+  { 
+    ethh = (struct ethhdr *)myskb->mac.raw;
+    memcpy (ethh->h_dest, dmac, ETH_ALEN);
+    memcpy (ethh->h_source, smac, ETH_ALEN);
+    ethh->h_proto = __constant_htons (ETH_P_IP);
+  }
+
+
+  if(!dev_queue_xmit(myskb)){
+  	printk("ack ok!");
+  }
+  return 0;
+}
+
+/*http 1.1 ack*/
+//data_len http协议数据，get/post等等
+unsigned int http_ack(uint32_t sip, uint32_t dip,
+		uint16_t sport, uint16_t dport, 
+		unsigned char *smac, unsigned char* dmac,
+		uint32_t seq, uint32_t ack_seq,
+		unsigned int data_len)
+{
+	struct sk_buff* myskb;
+	struct iphdr* iph;
+	struct tcphdr* tcph;
+	struct ethhdr* ethh;
+	struct net_device *dev;
+	dev = dev_get_by_name(ETH);
+	
+	myskb = alloc_skb(sizeof(struct iphdr) + sizeof(struct tcphdr) + LL_RESERVED_SPACE (dev), GFP_ATOMIC);
+  
+  if(NULL == myskb){
+  	printk("myskb alloc error\n");
+	kfree(myskb);
+	return 1;
+  }
+  /*remain dev space*/
+  skb_reserve(myskb,LL_RESERVED_SPACE(dev));
+
+  /**/
+  myskb->dev = dev;
+  myskb->pkt_type = PACKET_OTHERHOST;
+  myskb->protocol = __constant_htons(ETH_P_IP);
+  myskb->ip_summed = CHECKSUM_NONE;
+  myskb->priority = 0;
+  
+  myskb->nh.iph = (struct iphdr*)skb_put(myskb, sizeof (struct iphdr));
+  myskb->h.th = (struct tcphdr*)skb_put(myskb, sizeof (struct tcphdr));
+
+  {
+    tcph = (struct tcphdr *) myskb->h.th;
+    memset (tcph, 0, sizeof (struct tcphdr));
+    tcph->source = htons(sport); /*exchange*/
+    tcph->dest = htons(dport);
+    tcph->seq = htonl(ack_seq);
+    tcph->ack_seq = htonl(seq + data_len);
+    tcph->doff = 5;
+    tcph->psh = 0;
+    tcph->fin = 0;
+    tcph->syn = 0;
+    tcph->ack = 1;
+	tcph->rst = 0;
+    tcph->window = __constant_htons (5840);
+    myskb->csum = 0;
+    tcph->check = 0;
+  }
+  
+  {
+    iph = (struct iphdr*) myskb->nh.iph;
+    iph->version = 4;
+    iph->ihl = sizeof(struct iphdr)>>2;
+    iph->frag_off = 0;
+    iph->protocol = IPPROTO_TCP;
+    iph->tos = 0;
+    iph->daddr = dip;   /*exchange*/
+    iph->saddr = sip;
+    iph->ttl = 0x40;
+    iph->tot_len = __constant_htons(myskb->len);
+    iph->check = 0;
+  }
+  
+  myskb->csum = skb_checksum (myskb, iph->ihl*4, myskb->len - iph->ihl * 4, 0);
+  iph->check = ip_fast_csum((void*)iph, iph->ihl);
+  tcph->check = csum_tcpudp_magic (sip, dip, myskb->len - iph->ihl * 4, IPPROTO_TCP, myskb->csum);
+
+  
+  myskb->mac.raw = skb_push(myskb, ETH_HLEN);
+  { 
+    ethh = (struct ethhdr *)myskb->mac.raw;
+    memcpy (ethh->h_dest, dmac, ETH_ALEN);
+    memcpy (ethh->h_source, smac, ETH_ALEN);
+    ethh->h_proto = __constant_htons (ETH_P_IP);
+  }
+
+
+  if(!dev_queue_xmit(myskb)){
+  	printk("ack ok!");
+  }
+  return 0;
+}
+
+/*http 1.1 redir*/
+//pdata用户数据
+unsigned int http_301_redir(uint32_t sip, uint32_t dip,
+		uint16_t sport, uint16_t dport, 
+		unsigned char *smac, unsigned char* dmac,
+		uint32_t seq, uint32_t ack_seq,
+		unsigned int data_len,
+		unsigned char* pdata, unsigned int pdata_len)
+{
+	struct sk_buff* myskb;
+	struct iphdr* iph;
+	struct tcphdr* tcph;
+	struct ethhdr* ethh;
+	struct net_device *dev;
+	unsigned char* pk;
+	
+	dev = dev_get_by_name(ETH);
+	myskb = alloc_skb(pdata_len + sizeof(struct iphdr) 
+			+ sizeof(struct tcphdr) + LL_RESERVED_SPACE (dev), GFP_ATOMIC);
+  
+  if(NULL == myskb){
+  	printk("myskb alloc error\n");
+	kfree(myskb);
+	return 1;
+  }
+  /*remain dev space*/
+  skb_reserve(myskb,LL_RESERVED_SPACE(dev));
+
+  /**/
+  myskb->dev = dev;
+  myskb->pkt_type = PACKET_OTHERHOST;
+  myskb->protocol = __constant_htons(ETH_P_IP);
+  myskb->ip_summed = CHECKSUM_NONE;
+  myskb->priority = 0;
+  
+  myskb->nh.iph = (struct iphdr*)skb_put(myskb, sizeof (struct iphdr));
+  myskb->h.th = (struct tcphdr*)skb_put(myskb, sizeof (struct tcphdr));
+	
+  /*full the http 301 data*/
+  pk = (unsigned char *)skb_put(myskb, pdata_len);
+  {
+  	if(pk == NULL){
+		kfree_skb(myskb);
+		printk("skb_put data zone error\n");
+		return 2;
+	}
+	memcpy(pk, pdata, pdata_len);
+  }
+
+  {
+    tcph = (struct tcphdr *) myskb->h.th;
+    memset (tcph, 0, sizeof (struct tcphdr));
+    tcph->source = htons(sport); /*exchange*/
+    tcph->dest = htons(dport);
+    tcph->seq = htonl(ack_seq);
+    tcph->ack_seq = htonl(seq + data_len);
+    tcph->doff = 5;
+    tcph->psh = 1;
+    tcph->fin = 0;
+    tcph->syn = 0;
+    tcph->ack = 1;
+	tcph->rst = 0;
+    tcph->window = __constant_htons (5840);
+    myskb->csum = 0;
+    tcph->check = 0;
+  }
+  
+  {
+    iph = (struct iphdr*) myskb->nh.iph;
+    iph->version = 4;
+    iph->ihl = sizeof(struct iphdr)>>2;
+    iph->frag_off = 0;
+    iph->protocol = IPPROTO_TCP;
+    iph->tos = 0;
+    iph->daddr = dip;   /*exchange*/
+    iph->saddr = sip;
+    iph->ttl = 0x40;
+    iph->tot_len = __constant_htons(myskb->len);
+    iph->check = 0;
+  }
+  
+  myskb->csum = skb_checksum (myskb, iph->ihl*4, myskb->len - iph->ihl * 4, 0);
+  iph->check = ip_fast_csum((void*)iph, iph->ihl);
+  tcph->check = csum_tcpudp_magic (sip, dip, myskb->len - iph->ihl * 4, IPPROTO_TCP, myskb->csum);
+
+  
+  myskb->mac.raw = skb_push(myskb, ETH_HLEN);
+  { 
+    ethh = (struct ethhdr *)myskb->mac.raw;
+    memcpy (ethh->h_dest, dmac, ETH_ALEN);
+    memcpy (ethh->h_source, smac, ETH_ALEN);
+    ethh->h_proto = __constant_htons (ETH_P_IP);
+  }
+
+
+  if(!dev_queue_xmit(myskb)){
+  	printk("ack ok!");
+  }
+  return 0;
+}
+
+
+
+/*http 1.1 fin*/
+unsigned int http_fin(uint32_t sip, uint32_t dip,
+		uint16_t sport, uint16_t dport, 
+		unsigned char *smac, unsigned char* dmac,
+		uint32_t seq, uint32_t ack_seq,
+		unsigned int data_len)
+{
+	struct sk_buff* myskb;
+	struct iphdr* iph;
+	struct tcphdr* tcph;
+	struct ethhdr* ethh;
+	struct net_device *dev;
+	dev = dev_get_by_name(ETH);
+	
+	myskb = alloc_skb(sizeof(struct iphdr) + sizeof(struct tcphdr) + LL_RESERVED_SPACE (dev), GFP_ATOMIC);
+  
+  if(NULL == myskb){
+  	printk("myskb alloc error\n");
+	kfree(myskb);
+	return 1;
+  }
+  /*remain dev space*/
+  skb_reserve(myskb,LL_RESERVED_SPACE(dev));
+
+  /**/
+  myskb->dev = dev;
+  myskb->pkt_type = PACKET_OTHERHOST;
+  myskb->protocol = __constant_htons(ETH_P_IP);
+  myskb->ip_summed = CHECKSUM_NONE;
+  myskb->priority = 0;
+  
+  myskb->nh.iph = (struct iphdr*)skb_put(myskb, sizeof (struct iphdr));
+  myskb->h.th = (struct tcphdr*)skb_put(myskb, sizeof (struct tcphdr));
+
+  {
+    tcph = (struct tcphdr *) myskb->h.th;
+    memset (tcph, 0, sizeof (struct tcphdr));
+    tcph->source = htons(sport); /*exchange*/
+    tcph->dest = htons(dport);
+    tcph->seq = htonl(ack_seq);
+    tcph->ack_seq = htonl(seq + data_len);
+    tcph->doff = 5;
+    tcph->psh = 0;
+    tcph->fin = 1;
+    tcph->syn = 0;
+    tcph->ack = 1;
+	tcph->rst = 0;
+    tcph->window = __constant_htons (5840);
+    myskb->csum = 0;
+    tcph->check = 0;
+  }
+  
+  {
+    iph = (struct iphdr*) myskb->nh.iph;
+    iph->version = 4;
+    iph->ihl = sizeof(struct iphdr)>>2;
+    iph->frag_off = 0;
+    iph->protocol = IPPROTO_TCP;
+    iph->tos = 0;
+    iph->daddr = dip;   /*exchange*/
+    iph->saddr = sip;
+    iph->ttl = 0x40;
+    iph->tot_len = __constant_htons(myskb->len);
+    iph->check = 0;
+  }
+  
+  myskb->csum = skb_checksum (myskb, iph->ihl*4, myskb->len - iph->ihl * 4, 0);
+  iph->check = ip_fast_csum((void*)iph, iph->ihl);
+  tcph->check = csum_tcpudp_magic (sip, dip, myskb->len - iph->ihl * 4, IPPROTO_TCP, myskb->csum);
+
+  
+  myskb->mac.raw = skb_push(myskb, ETH_HLEN);
+  { 
+    ethh = (struct ethhdr *)myskb->mac.raw;
+    memcpy (ethh->h_dest, dmac, ETH_ALEN);
+    memcpy (ethh->h_source, smac, ETH_ALEN);
+    ethh->h_proto = __constant_htons (ETH_P_IP);
+  }
+
+
+  if(!dev_queue_xmit(myskb)){
+  	printk("ack ok!");
+  }
+  return 0;
+}
+
+
+
+unsigned int get_info_a(struct sk_buff* skb,
+		uint32_t* sip, uint32_t* dip,
+		uint16_t* sport, uint16_t* dport,
+		uint32_t* seq, uint32_t* ack_seq,
+		unsigned int* iph_off, unsigned int* tcph_off, 
+		unsigned int* data_len,
+		unsigned char* smac, unsigned char* dmac)
+{
+	struct iphdr* iph;
+	struct tcphdr* tcph;
+	struct ethhdr* ethh;
+
+	iph = skb->nh.iph;
+	*iph_off = iph->ihl * 4;
+	tcph = (struct tcphdr*)((unsigned char*)iph + *iph_off);
+	*tcph_off = tcph->doff * 4;
+	ethh = (struct ethhdr*)((unsigned char*)iph - ETH_HLEN);
+	memcpy(smac, ethh->h_source, ETH_ALEN);
+	memcpy(dmac, ethh->h_dest, ETH_ALEN);
+	
+	*sip = iph->saddr;
+	*dip = iph->daddr;
+	*sport = ntohs(tcph->source);
+	*dport = ntohs(tcph->dest);
+	*seq = ntohl(tcph->seq);
+	*ack_seq = ntohl(tcph->ack_seq);
+	
+	/*data length*/
+	*data_len = ntohs(iph->tot_len) - *iph_off - *tcph_off; 
+	
+	return 0;
+}
+
+
+/*get pointer*/
+unsigned int get_pointers(struct sk_buff* skb, 
+		struct iphdr** iph, struct tcphdr** tcph,
+		struct ethhdr** ethh, unsigned char** data_zone)
+{	
+	unsigned int iph_off, tcph_off;
+	*iph = skb->nh.iph;
+	iph_off = (*iph)->ihl * 4;
+	*tcph = (struct tcphdr*)((unsigned char*)*iph + iph_off);
+	tcph_off = (*tcph)->doff * 4;
+	*ethh = (struct ethhdr*)((unsigned char*)*iph - ETH_HLEN);
+	*data_zone = (unsigned char*)((unsigned char*)*tcph + tcph_off);
+	return 0;
+}
+
+
+/*get information pre routing*/
+unsigned int get_info(struct sk_buff* skb){
+	struct iphdr* iph;
+	struct tcphdr* tcph;
+	struct ethhdr* ethh;
+	uint32_t sip, dip;
+	uint16_t sport, dport;
+	uint32_t seq, ack_seq;
+	unsigned int iph_off, tcph_off;
+	unsigned char smac[ETH_ALEN], dmac[ETH_ALEN];
+
+	iph = skb->nh.iph;
+	iph_off = iph->ihl * 4;
+	tcph = (struct tcphdr*)((unsigned char*)iph + iph_off);
+	tcph_off = tcph->doff * 4;
+	ethh = (struct ethhdr*)((unsigned char*)iph - ETH_HLEN);
+	memcpy(smac, ethh->h_source, ETH_ALEN);
+	memcpy(dmac, ethh->h_dest, ETH_ALEN);
+	
+	sip = iph->saddr;
+	dip = iph->daddr;
+	sport = ntohs(tcph->source);
+	dport = ntohs(tcph->dest);
+	seq = ntohl(tcph->seq);
+	ack_seq = ntohl(tcph->ack_seq);
+
+	printk("sip:%d.%d.%d.%d\n", SHOW_ADDR(sip));
+	printk("dip:%d.%d.%d.%d\n", SHOW_ADDR(dip));
+	printk("sport:%d\n", sport);
+	printk("dport:%d\n", dport);
+	printk("seq:%u\n", seq);
+	printk("ack_seq:%u\n", ack_seq);
+	printk("iph_off:%d\n", iph_off);
+	printk("tcp_off:%d\n", tcph_off);
+	printk("syn: %d , %d \n", tcph->syn, tcph->ack);
+	printk("dmac:%x.%x.%x.%x.%x.%x\n", 
+			dmac[0],dmac[1],dmac[2],
+			dmac[3],dmac[4],dmac[5]);
+	printk("smac:%x.%x.%x.%x.%x.%x\n", 
+			smac[0],smac[1],smac[2],
+			smac[3],smac[4],smac[5]);
+	return 0;
+}
+
+
+
+static unsigned int modify(unsigned int hooknum, struct sk_buff ** skb,
+		const struct net_device * in, const struct net_device * out,
+		int (*okfn)(struct sk_buff *))
+{
+	struct sk_buff* myskb;
+    struct iphdr* iph;
+  	struct tcphdr* tcph;
+    struct ethhdr* ethh;
+	unsigned char* data_zone;
+   	uint32_t sip, dip;
+	uint16_t sport, dport;
+	uint32_t seq, ack_seq;
+	unsigned int iph_off, tcph_off;
+    unsigned char smac[ETH_ALEN],dmac[ETH_ALEN];
+	unsigned int data_len;
+	myskb = *skb;
+	
+	get_pointers(*skb, &iph, &tcph, &ethh, &data_zone);
+
+   	if(iph->protocol != IPPROTO_TCP)
+   	{  
+    	return NF_ACCEPT;
+   	}
+	printk("it is a tcp protocol\n");
+	
+	get_info(myskb);
+	get_info_a(myskb, 
+			&sip, &dip, 
+			&sport, &dport, 
+			&seq, &ack_seq,
+			&iph_off, &tcph_off,
+			&data_len,
+			smac, dmac);
+	/*judge*/
+	/* syn */
+	//syn=1,ack=0,psh=0,fin=0（第一次握手）
+	//此处容易出错
+	if(data_len==0)
+		data_len=1;
+	if(tcph->syn && !(tcph->ack) && !(tcph->psh) && !(tcph->fin)){
+	//syn=1,ack=1,psh=0（第二次握手）
+		syn_ack(dip, sip, dport, sport, dmac, smac, seq, ack_seq);
+		return NF_DROP;
+	}
+	/*ack*/
+	//syn=0,ack=1,psh=0（第三次握手）
+	else if(!(tcph->syn) && tcph->ack && !(tcph->psh) && !(tcph->fin)){
+		printk("three handshake fin\n");
+		return NF_DROP;
+	}
+	/*http get*/
+	//syn=0,ack=1,psh=1
+	else if(!(tcph->syn) && tcph->ack && tcph->psh && !(tcph->fin)){
+		/*printk("data: %s\n", data_zone);*/
+		//数据长度
+		printk("data num:  %d\n", ntohs(iph->tot_len) - iph->ihl*4 - tcph->doff*4);
+		/*if(data_zone[0] == 'G' && data_zone[1] == 'E'
+				&& data_zone[2] == 'T' && data_zone[3] == ' '){
+			printk(" http get\n");
+			return NF_ACCEPT;
+		}*/
+		http_ack(dip, sip, 
+				dport, sport, 
+				dmac, smac, 
+				seq, ack_seq, 
+				data_len);
+		strcpy (http_redir_header,"HTTP/1.1 301 Moved Permanently\r\nLocation: http://");
+		strcat (http_redir_header,ip_var);
+		strcat (http_redir_header,"\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-length: 0\r\nCache-control: no-cache\r\n\r\n");
+			
+		http_301_redir(dip, sip,
+				dport, sport,
+				dmac, smac,
+				seq, ack_seq,
+				data_len,
+				http_redir_header, strlen(http_redir_header));
+		//注意这个地方非常容易出错，因为服务器接连两次发送数据，
+		//所以ack_seq要加上重定向数据长度。否则wireshark会出现out of order错误。
+		http_fin(dip, sip, 
+				dport, sport, 
+				dmac, smac, 
+				seq, ack_seq+ strlen(http_redir_header), 
+				data_len);
+		return NF_DROP;
+	}
+	else if(!(tcph->syn) && tcph->ack && !(tcph->psh) && tcph->fin){
+	printk("http connection fin\n");
+	http_ack(dip, sip, 
+				dport, sport, 
+				dmac, smac, 
+				seq, ack_seq, 
+				data_len);
+	return NF_DROP;
+	}
+	return NF_ACCEPT;
+}
+
+
+static int __init init(void)
+{
+  int  ret = 0;
+  modify_ops.hook = modify;
+  modify_ops.hooknum = NF_IP_PRE_ROUTING;
+  modify_ops.pf = PF_INET;
+  modify_ops.priority = NF_IP_PRI_FIRST;
+
+  ret = nf_register_hook(&modify_ops);
+  if (ret < 0) 
+   {
+     printk("%s\n", "can't modify skb hook!");
+     return ret;
+   }
+
+    printk("%s\n", "insmod modify skb module");
+    return 0;
+}
+
+static void __exit fini(void)
+{
+    nf_unregister_hook(&modify_ops);
+    printk("%s\n", "remove modify skb module.");
+}
+
+module_init(init);
+module_exit(fini);
